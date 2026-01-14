@@ -1,65 +1,191 @@
 
-import React, { useState, useMemo } from 'react';
-import { Camera, Upload, Trash2, Sparkles, Wand2, Filter, Palette, RefreshCcw } from 'lucide-react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { Camera, Upload, Trash2, Sparkles, Wand2, Filter, Palette, RefreshCcw, AlertCircle, X } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import Button from './components/Button';
 import OutfitCard from './components/OutfitCard';
-import { analyzeItem, generateOutfitImage } from './services/geminiService';
-import { takePhoto, getImageDataUrl } from './services/cameraService';
+import { analyzeItem, generateOutfitImage, getGeminiErrorMessage } from './services/geminiService';
+import { takePhoto, getImageDataUrl, getCameraErrorMessage, isUserCancellation } from './services/cameraService';
+import {
+  processImageFile,
+  processBase64Image,
+  getErrorMessage,
+  formatFileSize,
+  IMAGE_CONFIG,
+} from './services/imageValidationService';
 import { AnalysisResult, OutfitSuggestion, StyleType } from './types';
+
+// Toast notification component
+interface ToastProps {
+  message: string;
+  type: 'error' | 'warning' | 'info';
+  onClose: () => void;
+}
+
+const Toast: React.FC<ToastProps> = ({ message, type, onClose }) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 5000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  const bgColor = type === 'error' ? 'bg-red-50 border-red-200' : type === 'warning' ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-200';
+  const textColor = type === 'error' ? 'text-red-800' : type === 'warning' ? 'text-amber-800' : 'text-blue-800';
+  const iconColor = type === 'error' ? 'text-red-500' : type === 'warning' ? 'text-amber-500' : 'text-blue-500';
+
+  return (
+    <div className={`fixed top-20 left-1/2 -translate-x-1/2 z-[100] max-w-md w-[90%] ${bgColor} border rounded-2xl p-4 shadow-lg animate-in slide-in-from-top-4 duration-300`}>
+      <div className="flex items-start gap-3">
+        <AlertCircle className={`${iconColor} shrink-0 mt-0.5`} size={20} />
+        <p className={`${textColor} text-sm flex-1`}>{message}</p>
+        <button onClick={onClose} className={`${iconColor} hover:opacity-70`}>
+          <X size={18} />
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const App: React.FC = () => {
   const [image, setImage] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isProcessingImage, setIsProcessingImage] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [outfits, setOutfits] = useState<OutfitSuggestion[]>([]);
   const [activeColorFilter, setActiveColorFilter] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'error' | 'warning' | 'info' } | null>(null);
   const isNative = Capacitor.isNativePlatform();
 
-  // Handle file upload for web
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImage(reader.result as string);
-        setAnalysis(null);
-        setOutfits([]);
-        setActiveColorFilter(null);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+  // Refs for cleanup
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const imageUrlsRef = useRef<Set<string>>(new Set());
 
-  // Handle camera/photo library for mobile
-  const handleMobileImageSelect = async (source: 'camera' | 'library') => {
-    const cameraImage = await takePhoto(source);
-    if (cameraImage) {
-      const dataUrl = getImageDataUrl(cameraImage);
-      setImage(dataUrl);
+  // Cleanup function for memory management
+  const cleanupImageUrls = useCallback(() => {
+    imageUrlsRef.current.forEach(url => {
+      if (url.startsWith('blob:')) {
+        URL.revokeObjectURL(url);
+      }
+    });
+    imageUrlsRef.current.clear();
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cleanupImageUrls();
+      abortControllerRef.current?.abort();
+    };
+  }, [cleanupImageUrls]);
+
+  const showToast = useCallback((message: string, type: 'error' | 'warning' | 'info' = 'error') => {
+    setToast({ message, type });
+  }, []);
+
+  const hideToast = useCallback(() => {
+    setToast(null);
+  }, []);
+
+  // Handle file upload for web with validation and compression
+  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Reset file input for re-selection of same file
+    e.target.value = '';
+
+    setIsProcessingImage(true);
+    try {
+      const processed = await processImageFile(file);
+
+      // Show compression info if image was compressed
+      if (processed.wasCompressed) {
+        const saved = processed.originalSize - processed.processedSize;
+        if (saved > 100 * 1024) { // Only show if saved > 100KB
+          showToast(
+            `Image optimized: ${formatFileSize(processed.originalSize)} → ${formatFileSize(processed.processedSize)}`,
+            'info'
+          );
+        }
+      }
+
+      // Clear previous state
+      cleanupImageUrls();
+      setImage(processed.dataUrl);
       setAnalysis(null);
       setOutfits([]);
       setActiveColorFilter(null);
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error');
+    } finally {
+      setIsProcessingImage(false);
     }
-  };
+  }, [cleanupImageUrls, showToast]);
 
-  const clearImage = () => {
+  // Handle camera/photo library for mobile with validation
+  const handleMobileImageSelect = useCallback(async (source: 'camera' | 'library') => {
+    setIsProcessingImage(true);
+    try {
+      const cameraImage = await takePhoto(source);
+      if (!cameraImage) {
+        return; // User cancelled or no image
+      }
+
+      // Process and validate the image
+      const processed = await processBase64Image(cameraImage.base64String, cameraImage.format);
+
+      // Show compression info
+      if (processed.wasCompressed) {
+        const saved = processed.originalSize - processed.processedSize;
+        if (saved > 100 * 1024) {
+          showToast(
+            `Image optimized for faster analysis`,
+            'info'
+          );
+        }
+      }
+
+      // Clear previous state
+      cleanupImageUrls();
+      setImage(processed.dataUrl);
+      setAnalysis(null);
+      setOutfits([]);
+      setActiveColorFilter(null);
+    } catch (error) {
+      // Don't show error for user cancellation
+      if (!isUserCancellation(error)) {
+        showToast(getCameraErrorMessage(error), 'error');
+      }
+    } finally {
+      setIsProcessingImage(false);
+    }
+  }, [cleanupImageUrls, showToast]);
+
+  const clearImage = useCallback(() => {
+    // Abort any ongoing requests
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
+    // Clean up memory
+    cleanupImageUrls();
+
     setImage(null);
     setAnalysis(null);
     setOutfits([]);
     setActiveColorFilter(null);
-  };
+  }, [cleanupImageUrls]);
 
-  const startStyling = async () => {
+  const startStyling = useCallback(async () => {
     if (!image) return;
+
+    // Abort previous request if any
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = new AbortController();
 
     try {
       setIsAnalyzing(true);
-      // Convert data URL to base64 for API
-      const base64Image = image.includes(',') ? image : `data:image/jpeg;base64,${image}`;
-      const result = await analyzeItem(base64Image);
+      const result = await analyzeItem(image);
       setAnalysis(result);
-      
+
       const initialOutfits: OutfitSuggestion[] = result.suggestions.map(s => ({
         type: s.type as StyleType,
         description: s.description,
@@ -68,53 +194,71 @@ const App: React.FC = () => {
       }));
       setOutfits(initialOutfits);
 
-      // Generate images
-      initialOutfits.forEach(async (outfit, index) => {
+      // Generate images with proper error handling
+      const generateImage = async (outfit: OutfitSuggestion, index: number) => {
         try {
           const imageUrl = await generateOutfitImage(result.description, outfit.description, outfit.type);
+
+          // Track generated image URL for cleanup
+          imageUrlsRef.current.add(imageUrl);
+
           setOutfits(prev => {
             const updated = [...prev];
             updated[index] = { ...updated[index], imageUrl, isGenerating: false };
             return updated;
           });
         } catch (err) {
+          const errorMessage = getGeminiErrorMessage(err);
           setOutfits(prev => {
             const updated = [...prev];
-            updated[index] = { ...updated[index], isGenerating: false, error: "Image failed" };
+            updated[index] = { ...updated[index], isGenerating: false, error: errorMessage };
             return updated;
           });
         }
-      });
+      };
+
+      // Generate all images concurrently
+      await Promise.allSettled(
+        initialOutfits.map((outfit, index) => generateImage(outfit, index))
+      );
 
     } catch (err) {
-      console.error(err);
-      alert("Styling analysis failed. Please try another photo.");
+      const errorMessage = getGeminiErrorMessage(err);
+      showToast(errorMessage, 'error');
     } finally {
       setIsAnalyzing(false);
     }
-  };
+  }, [image, showToast]);
 
   const filteredOutfits = useMemo(() => {
     if (!activeColorFilter) return outfits;
-    return outfits.filter(o => 
+    return outfits.filter(o =>
       o.colorsUsed.some(c => c.toLowerCase() === activeColorFilter.toLowerCase())
     );
   }, [outfits, activeColorFilter]);
 
-  const updateOutfitImage = (index: number, newImageUrl: string) => {
+  const updateOutfitImage = useCallback((index: number, newImageUrl: string) => {
+    // Track new image URL for cleanup
+    imageUrlsRef.current.add(newImageUrl);
+
     setOutfits(prev => {
       const updated = [...prev];
       updated[index] = { ...updated[index], imageUrl: newImageUrl };
       return updated;
     });
-  };
+  }, []);
 
-  const toggleFilter = (color: string) => {
+  const toggleFilter = useCallback((color: string) => {
     setActiveColorFilter(prev => prev === color ? null : color);
-  };
+  }, []);
 
   return (
     <div className="min-h-screen pb-20 bg-[#FBFBFB]">
+      {/* Toast notification */}
+      {toast && (
+        <Toast message={toast.message} type={toast.type} onClose={hideToast} />
+      )}
+
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-zinc-100 px-6 py-4">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
           <div className="flex items-center gap-2">
@@ -133,7 +277,7 @@ const App: React.FC = () => {
 
       <main className="max-w-7xl mx-auto px-6 mt-16">
         <div className="grid lg:grid-cols-12 gap-16">
-          
+
           <div className="lg:col-span-4">
             <div className="sticky top-32 space-y-12">
               <div>
@@ -152,11 +296,16 @@ const App: React.FC = () => {
                     <>
                       <button
                         onClick={() => handleMobileImageSelect('camera')}
-                        className="group relative w-full border-2 border-dashed border-zinc-200 rounded-[2.5rem] p-12 transition-all hover:border-black hover:bg-white text-center"
+                        disabled={isProcessingImage}
+                        className="group relative w-full border-2 border-dashed border-zinc-200 rounded-[2.5rem] p-12 transition-all hover:border-black hover:bg-white text-center disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <div className="flex flex-col items-center gap-6">
                           <div className="w-20 h-20 bg-zinc-50 rounded-full flex items-center justify-center group-hover:bg-zinc-100 transition-all duration-500">
-                            <Camera className="text-zinc-300 w-8 h-8 group-hover:text-black transition-colors" />
+                            {isProcessingImage ? (
+                              <div className="w-8 h-8 border-2 border-zinc-300 border-t-black rounded-full animate-spin" />
+                            ) : (
+                              <Camera className="text-zinc-300 w-8 h-8 group-hover:text-black transition-colors" />
+                            )}
                           </div>
                           <div>
                             <p className="font-semibold text-zinc-900 mb-1">Take Photo</p>
@@ -166,11 +315,16 @@ const App: React.FC = () => {
                       </button>
                       <button
                         onClick={() => handleMobileImageSelect('library')}
-                        className="group relative w-full border-2 border-dashed border-zinc-200 rounded-[2.5rem] p-12 transition-all hover:border-black hover:bg-white text-center"
+                        disabled={isProcessingImage}
+                        className="group relative w-full border-2 border-dashed border-zinc-200 rounded-[2.5rem] p-12 transition-all hover:border-black hover:bg-white text-center disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <div className="flex flex-col items-center gap-6">
                           <div className="w-20 h-20 bg-zinc-50 rounded-full flex items-center justify-center group-hover:bg-zinc-100 transition-all duration-500">
-                            <Upload className="text-zinc-300 w-8 h-8 group-hover:text-black transition-colors" />
+                            {isProcessingImage ? (
+                              <div className="w-8 h-8 border-2 border-zinc-300 border-t-black rounded-full animate-spin" />
+                            ) : (
+                              <Upload className="text-zinc-300 w-8 h-8 group-hover:text-black transition-colors" />
+                            )}
                           </div>
                           <div>
                             <p className="font-semibold text-zinc-900 mb-1">Choose from Library</p>
@@ -184,17 +338,29 @@ const App: React.FC = () => {
                     <div className="group relative border-2 border-dashed border-zinc-200 rounded-[2.5rem] p-16 transition-all hover:border-black hover:bg-white text-center">
                       <input
                         type="file"
-                        accept="image/*"
+                        accept={IMAGE_CONFIG.ALLOWED_TYPES.join(',')}
                         onChange={handleFileUpload}
-                        className="absolute inset-0 opacity-0 cursor-pointer"
+                        disabled={isProcessingImage}
+                        className="absolute inset-0 opacity-0 cursor-pointer disabled:cursor-not-allowed"
                       />
                       <div className="flex flex-col items-center gap-6">
                         <div className="w-20 h-20 bg-zinc-50 rounded-full flex items-center justify-center group-hover:bg-zinc-100 transition-all duration-500">
-                          <Upload className="text-zinc-300 w-8 h-8 group-hover:text-black transition-colors" />
+                          {isProcessingImage ? (
+                            <div className="w-8 h-8 border-2 border-zinc-300 border-t-black rounded-full animate-spin" />
+                          ) : (
+                            <Upload className="text-zinc-300 w-8 h-8 group-hover:text-black transition-colors" />
+                          )}
                         </div>
                         <div>
-                          <p className="font-semibold text-zinc-900 mb-1">Upload Garment</p>
-                          <p className="text-xs text-zinc-400 uppercase tracking-widest">Drag & Drop or Click</p>
+                          <p className="font-semibold text-zinc-900 mb-1">
+                            {isProcessingImage ? 'Processing...' : 'Upload Garment'}
+                          </p>
+                          <p className="text-xs text-zinc-400 uppercase tracking-widest">
+                            {isProcessingImage ? 'Optimizing image' : 'Drag & Drop or Click'}
+                          </p>
+                          <p className="text-[10px] text-zinc-300 mt-2">
+                            Max {formatFileSize(IMAGE_CONFIG.MAX_FILE_SIZE)} • JPEG, PNG, WebP
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -204,7 +370,7 @@ const App: React.FC = () => {
                 <div className="space-y-8">
                   <div className="relative aspect-[4/5] rounded-[2.5rem] overflow-hidden shadow-2xl bg-zinc-100 group">
                     <img src={image} alt="Selected item" className="w-full h-full object-cover grayscale-[0.2] transition-all duration-700 hover:grayscale-0 hover:scale-105" />
-                    <button 
+                    <button
                       onClick={clearImage}
                       className="absolute top-6 right-6 bg-white/90 p-3 rounded-full shadow-lg hover:bg-white text-zinc-600 transition-all hover:rotate-90"
                     >
@@ -222,10 +388,10 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                  
+
                   {!analysis && (
-                    <Button 
-                      onClick={startStyling} 
+                    <Button
+                      onClick={startStyling}
                       className="w-full py-5 text-sm uppercase tracking-widest rounded-2xl"
                       isLoading={isAnalyzing}
                     >
@@ -245,14 +411,14 @@ const App: React.FC = () => {
                         <h3 className="font-bold text-xs uppercase tracking-[0.2em] text-zinc-900">Color Profile</h3>
                       </div>
                     </div>
-                    
+
                     <div className="space-y-6">
                       <div>
                         <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-300 mb-4">Original Palette</p>
                         <div className="flex flex-wrap gap-3">
                           {analysis.originalPalette.map((color, i) => (
-                            <button 
-                              key={i} 
+                            <button
+                              key={i}
                               onClick={() => toggleFilter(color)}
                               className={`group relative w-12 h-12 rounded-2xl transition-all duration-300 border-2 ${activeColorFilter === color ? 'border-black scale-110 shadow-lg' : 'border-transparent hover:scale-105 hover:shadow-md'}`}
                               style={{ backgroundColor: color }}
@@ -274,8 +440,8 @@ const App: React.FC = () => {
                         <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-300 mb-4">Complimentary Accents</p>
                         <div className="flex flex-wrap gap-3">
                           {analysis.complimentaryPalette.map((color, i) => (
-                            <button 
-                              key={i} 
+                            <button
+                              key={i}
                               onClick={() => toggleFilter(color)}
                               className={`group relative w-12 h-12 rounded-2xl transition-all duration-300 border-2 ${activeColorFilter === color ? 'border-black scale-110 shadow-lg' : 'border-transparent hover:scale-105 hover:shadow-md'}`}
                               style={{ backgroundColor: color }}
@@ -317,7 +483,7 @@ const App: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-6">
                     {activeColorFilter && (
-                      <button 
+                      <button
                         onClick={() => setActiveColorFilter(null)}
                         className="flex items-center gap-2 text-[10px] font-bold text-zinc-400 uppercase tracking-[0.2em] hover:text-black transition-colors"
                       >
@@ -327,13 +493,13 @@ const App: React.FC = () => {
                     )}
                   </div>
                 </div>
-                
+
                 <div className="grid md:grid-cols-1 lg:grid-cols-2 gap-12">
                   {filteredOutfits.length > 0 ? (
                     filteredOutfits.map((outfit, idx) => (
-                      <OutfitCard 
-                        key={idx} 
-                        outfit={outfit} 
+                      <OutfitCard
+                        key={idx}
+                        outfit={outfit}
                         activeFilter={activeColorFilter}
                         onColorClick={toggleFilter}
                         onUpdate={(newImg) => updateOutfitImage(idx, newImg)}
@@ -346,7 +512,7 @@ const App: React.FC = () => {
                       </div>
                       <h4 className="text-xl font-medium text-zinc-900 mb-2">No direct color matches</h4>
                       <p className="text-sm text-zinc-400 font-light mb-8 max-w-xs text-center">Try selecting a complimentary shade or resetting the filter to see the full collection.</p>
-                      <button 
+                      <button
                         onClick={() => setActiveColorFilter(null)}
                         className="px-8 py-3 bg-black text-white text-[10px] uppercase tracking-widest rounded-full hover:bg-zinc-800 transition-colors"
                       >
