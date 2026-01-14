@@ -1,10 +1,11 @@
 
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { Camera, Upload, Trash2, Sparkles, Wand2, Filter, Palette, RefreshCcw, AlertCircle, X } from 'lucide-react';
+import { Camera, Upload, Trash2, Sparkles, Wand2, Filter, Palette, RefreshCcw, AlertCircle, X, Gem } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import Button from './components/Button';
 import OutfitCard from './components/OutfitCard';
-import { analyzeItem, generateOutfitImage, getGeminiErrorMessage } from './services/geminiService';
+import FashionDNACard from './components/FashionDNACard';
+import { analyzeItem, generateOutfitImage, analyzeFashionDNA, getGeminiErrorMessage } from './services/geminiService';
 import { takePhoto, getImageDataUrl, getCameraErrorMessage, isUserCancellation } from './services/cameraService';
 import {
   processImageFile,
@@ -13,7 +14,7 @@ import {
   formatFileSize,
   IMAGE_CONFIG,
 } from './services/imageValidationService';
-import { AnalysisResult, OutfitSuggestion, StyleType } from './types';
+import { AnalysisResult, OutfitSuggestion, StyleType, FashionDNA } from './types';
 
 // Toast notification component
 interface ToastProps {
@@ -50,8 +51,11 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isProcessingImage, setIsProcessingImage] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [fashionDNA, setFashionDNA] = useState<FashionDNA | null>(null);
+  const [isAnalyzingDNA, setIsAnalyzingDNA] = useState(false);
   const [outfits, setOutfits] = useState<OutfitSuggestion[]>([]);
   const [activeColorFilter, setActiveColorFilter] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<'collection' | 'dna'>('collection');
   const [toast, setToast] = useState<{ message: string; type: 'error' | 'warning' | 'info' } | null>(null);
   const isNative = Capacitor.isNativePlatform();
 
@@ -170,8 +174,10 @@ const App: React.FC = () => {
 
     setImage(null);
     setAnalysis(null);
+    setFashionDNA(null);
     setOutfits([]);
     setActiveColorFilter(null);
+    setActiveView('collection');
   }, [cleanupImageUrls]);
 
   const startStyling = useCallback(async () => {
@@ -183,50 +189,72 @@ const App: React.FC = () => {
 
     try {
       setIsAnalyzing(true);
-      const result = await analyzeItem(image);
-      setAnalysis(result);
+      setIsAnalyzingDNA(true);
 
-      const initialOutfits: OutfitSuggestion[] = result.suggestions.map(s => ({
-        type: s.type as StyleType,
-        description: s.description,
-        colorsUsed: s.colorsUsed,
-        isGenerating: true
-      }));
-      setOutfits(initialOutfits);
+      // Run both analyses in parallel for faster results
+      const [analysisResult, dnaResult] = await Promise.allSettled([
+        analyzeItem(image),
+        analyzeFashionDNA(image)
+      ]);
 
-      // Generate images with proper error handling
-      const generateImage = async (outfit: OutfitSuggestion, index: number) => {
-        try {
-          const imageUrl = await generateOutfitImage(result.description, outfit.description, outfit.type);
+      // Handle main analysis result
+      if (analysisResult.status === 'fulfilled') {
+        const result = analysisResult.value;
+        setAnalysis(result);
 
-          // Track generated image URL for cleanup
-          imageUrlsRef.current.add(imageUrl);
+        const initialOutfits: OutfitSuggestion[] = result.suggestions.map(s => ({
+          type: s.type as StyleType,
+          description: s.description,
+          colorsUsed: s.colorsUsed,
+          isGenerating: true
+        }));
+        setOutfits(initialOutfits);
 
-          setOutfits(prev => {
-            const updated = [...prev];
-            updated[index] = { ...updated[index], imageUrl, isGenerating: false };
-            return updated;
-          });
-        } catch (err) {
-          const errorMessage = getGeminiErrorMessage(err);
-          setOutfits(prev => {
-            const updated = [...prev];
-            updated[index] = { ...updated[index], isGenerating: false, error: errorMessage };
-            return updated;
-          });
-        }
-      };
+        // Generate images with proper error handling
+        const generateImage = async (outfit: OutfitSuggestion, index: number) => {
+          try {
+            const imageUrl = await generateOutfitImage(result.description, outfit.description, outfit.type);
 
-      // Generate all images concurrently
-      await Promise.allSettled(
-        initialOutfits.map((outfit, index) => generateImage(outfit, index))
-      );
+            // Track generated image URL for cleanup
+            imageUrlsRef.current.add(imageUrl);
+
+            setOutfits(prev => {
+              const updated = [...prev];
+              updated[index] = { ...updated[index], imageUrl, isGenerating: false };
+              return updated;
+            });
+          } catch (err) {
+            const errorMessage = getGeminiErrorMessage(err);
+            setOutfits(prev => {
+              const updated = [...prev];
+              updated[index] = { ...updated[index], isGenerating: false, error: errorMessage };
+              return updated;
+            });
+          }
+        };
+
+        // Generate all images concurrently
+        await Promise.allSettled(
+          initialOutfits.map((outfit, index) => generateImage(outfit, index))
+        );
+      } else {
+        showToast(getGeminiErrorMessage(analysisResult.reason), 'error');
+      }
+
+      // Handle Fashion DNA result
+      if (dnaResult.status === 'fulfilled') {
+        setFashionDNA(dnaResult.value);
+      } else {
+        console.warn('Fashion DNA analysis failed:', dnaResult.reason);
+        // Don't show error to user - DNA analysis is supplementary
+      }
 
     } catch (err) {
       const errorMessage = getGeminiErrorMessage(err);
       showToast(errorMessage, 'error');
     } finally {
       setIsAnalyzing(false);
+      setIsAnalyzingDNA(false);
     }
   }, [image, showToast]);
 
@@ -259,18 +287,32 @@ const App: React.FC = () => {
         <Toast message={toast.message} type={toast.type} onClose={hideToast} />
       )}
 
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-zinc-100 px-6 py-4">
+      <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-xl border-b border-zinc-100/50 px-6 py-4">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
-              <Sparkles className="text-white w-4 h-4" />
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-br from-zinc-900 to-black rounded-xl flex items-center justify-center shadow-lg">
+              <Sparkles className="text-white w-5 h-5" />
             </div>
-            <h1 className="text-lg font-bold tracking-widest">AURA <span className="font-light text-zinc-400">STYLIST</span></h1>
+            <div>
+              <h1 className="text-base font-bold tracking-[0.2em]">AURA</h1>
+              <p className="text-[9px] font-medium tracking-[0.3em] text-zinc-400 -mt-0.5">STYLIST</p>
+            </div>
           </div>
-          <nav className="hidden md:flex gap-8 text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400">
-            <a href="#" className="hover:text-black transition-colors">Trends</a>
-            <a href="#" className="hover:text-black transition-colors">Archive</a>
-            <a href="#" className="hover:text-black transition-colors">Vault</a>
+          <nav className="hidden md:flex items-center gap-10">
+            <a href="#" className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400 hover:text-black transition-colors relative group">
+              Trends
+              <span className="absolute -bottom-1 left-0 w-0 h-px bg-black transition-all group-hover:w-full" />
+            </a>
+            <a href="#" className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400 hover:text-black transition-colors relative group">
+              Archive
+              <span className="absolute -bottom-1 left-0 w-0 h-px bg-black transition-all group-hover:w-full" />
+            </a>
+            <a href="#" className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-400 hover:text-black transition-colors relative group">
+              Vault
+              <span className="absolute -bottom-1 left-0 w-0 h-px bg-black transition-all group-hover:w-full" />
+            </a>
+            <div className="w-px h-4 bg-zinc-200" />
+            <span className="text-[9px] font-medium tracking-[0.15em] text-zinc-300 uppercase">Luxury Lookbook</span>
           </nav>
         </div>
       </header>
@@ -281,11 +323,13 @@ const App: React.FC = () => {
           <div className="lg:col-span-4">
             <div className="sticky top-32 space-y-12">
               <div>
-                <h2 className="text-5xl md:text-6xl font-serif mb-6 leading-[1.1]">
-                  Style<br /><span className="text-zinc-300">Intelligent.</span>
+                <p className="text-[10px] uppercase tracking-[0.4em] text-zinc-400 font-medium mb-4">Fashion Intelligence</p>
+                <h2 className="text-5xl md:text-6xl font-serif mb-6 leading-[1.05] tracking-tight">
+                  Style<br /><span className="text-zinc-300">Decoded.</span>
                 </h2>
-                <p className="text-zinc-500 max-w-sm font-light leading-relaxed">
-                  Bridge the gap between your wardrobe and color theory. Upload an item to unlock three curated worlds.
+                <p className="text-zinc-500 max-w-sm font-light leading-relaxed text-[15px]">
+                  Unlock the hidden DNA of your wardrobe. Our master fashion historian reveals the era,
+                  designer influences, and cultural context behind every piece.
                 </p>
               </div>
 
@@ -377,13 +421,17 @@ const App: React.FC = () => {
                       <Trash2 size={18} />
                     </button>
                     {isAnalyzing && (
-                      <div className="absolute inset-0 bg-white/60 backdrop-blur-md flex items-center justify-center">
-                        <div className="flex flex-col items-center gap-6">
+                      <div className="absolute inset-0 bg-gradient-to-br from-black/80 via-zinc-900/90 to-black/80 backdrop-blur-sm flex items-center justify-center">
+                        <div className="flex flex-col items-center gap-6 text-center px-6">
                           <div className="relative">
-                             <div className="w-16 h-16 border-2 border-zinc-100 rounded-full"></div>
-                             <div className="absolute inset-0 w-16 h-16 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
+                            <div className="w-20 h-20 border border-white/20 rounded-full"></div>
+                            <div className="absolute inset-0 w-20 h-20 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                            <div className="absolute inset-2 w-16 h-16 border border-white/10 rounded-full"></div>
                           </div>
-                          <p className="font-bold text-[10px] uppercase tracking-[0.3em] text-black">Decoding Color DNA</p>
+                          <div>
+                            <p className="font-serif text-white text-lg mb-2">Analyzing</p>
+                            <p className="font-medium text-[10px] uppercase tracking-[0.4em] text-white/60">Fashion Intelligence Active</p>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -403,30 +451,42 @@ const App: React.FC = () => {
               )}
 
               {analysis && (
-                <div className="space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-1000">
-                  <div className="p-8 bg-white rounded-[2rem] border border-zinc-100 shadow-xl space-y-8">
+                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-1000">
+                  {/* Item Name Header */}
+                  <div className="text-center py-4">
+                    <p className="text-[9px] uppercase tracking-[0.4em] text-zinc-400 font-medium mb-2">Identified As</p>
+                    <h3 className="font-serif text-2xl text-zinc-900">{analysis.itemName}</h3>
+                  </div>
+
+                  {/* Color Profile Card */}
+                  <div className="p-8 bg-gradient-to-br from-white to-zinc-50/50 rounded-[2rem] border border-zinc-100 shadow-xl space-y-8">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <Palette size={18} className="text-zinc-900" />
-                        <h3 className="font-bold text-xs uppercase tracking-[0.2em] text-zinc-900">Color Profile</h3>
+                        <div className="w-9 h-9 bg-gradient-to-br from-zinc-900 to-zinc-700 rounded-xl flex items-center justify-center">
+                          <Palette size={16} className="text-white" />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-xs uppercase tracking-[0.15em] text-zinc-900">Color Profile</h3>
+                          <p className="text-[9px] text-zinc-400 uppercase tracking-wider">Chromatic Analysis</p>
+                        </div>
                       </div>
                     </div>
 
                     <div className="space-y-6">
                       <div>
-                        <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-300 mb-4">Original Palette</p>
+                        <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-400 mb-4">Original Palette</p>
                         <div className="flex flex-wrap gap-3">
                           {analysis.originalPalette.map((color, i) => (
                             <button
                               key={i}
                               onClick={() => toggleFilter(color)}
-                              className={`group relative w-12 h-12 rounded-2xl transition-all duration-300 border-2 ${activeColorFilter === color ? 'border-black scale-110 shadow-lg' : 'border-transparent hover:scale-105 hover:shadow-md'}`}
+                              className={`group relative w-12 h-12 rounded-2xl transition-all duration-300 border-2 shadow-sm ${activeColorFilter === color ? 'border-black scale-110 shadow-lg ring-2 ring-black/10 ring-offset-2' : 'border-white hover:scale-105 hover:shadow-md'}`}
                               style={{ backgroundColor: color }}
                               title={`Filter by ${color}`}
                             >
                               {activeColorFilter === color && (
                                 <div className="absolute inset-0 flex items-center justify-center">
-                                  <div className="bg-white/40 backdrop-blur-sm rounded-full p-1">
+                                  <div className="bg-white/50 backdrop-blur-sm rounded-full p-1">
                                     <Filter size={12} className="text-black" />
                                   </div>
                                 </div>
@@ -436,20 +496,22 @@ const App: React.FC = () => {
                         </div>
                       </div>
 
+                      <div className="h-px bg-gradient-to-r from-transparent via-zinc-200 to-transparent" />
+
                       <div>
-                        <p className="text-[10px] uppercase tracking-widest font-bold text-zinc-300 mb-4">Complimentary Accents</p>
+                        <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-400 mb-4">Complimentary Accents</p>
                         <div className="flex flex-wrap gap-3">
                           {analysis.complimentaryPalette.map((color, i) => (
                             <button
                               key={i}
                               onClick={() => toggleFilter(color)}
-                              className={`group relative w-12 h-12 rounded-2xl transition-all duration-300 border-2 ${activeColorFilter === color ? 'border-black scale-110 shadow-lg' : 'border-transparent hover:scale-105 hover:shadow-md'}`}
+                              className={`group relative w-12 h-12 rounded-2xl transition-all duration-300 border-2 shadow-sm ${activeColorFilter === color ? 'border-black scale-110 shadow-lg ring-2 ring-black/10 ring-offset-2' : 'border-white hover:scale-105 hover:shadow-md'}`}
                               style={{ backgroundColor: color }}
                               title={`Filter by ${color}`}
                             >
                               {activeColorFilter === color && (
                                 <div className="absolute inset-0 flex items-center justify-center">
-                                  <div className="bg-white/40 backdrop-blur-sm rounded-full p-1">
+                                  <div className="bg-white/50 backdrop-blur-sm rounded-full p-1">
                                     <Filter size={12} className="text-black" />
                                   </div>
                                 </div>
@@ -459,30 +521,90 @@ const App: React.FC = () => {
                         </div>
                       </div>
                     </div>
+                  </div>
 
-                    <div className="pt-8 border-t border-zinc-50">
-                      <p className="text-sm text-zinc-400 font-light leading-relaxed italic">
+                  {/* Editorial Description */}
+                  <div className="p-6 bg-zinc-900 rounded-2xl text-white relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl from-white/5 to-transparent rounded-full -translate-y-1/2 translate-x-1/2" />
+                    <div className="relative z-10">
+                      <p className="text-[9px] uppercase tracking-[0.3em] text-white/40 font-medium mb-3">Editorial Notes</p>
+                      <p className="text-sm text-white/80 font-light leading-relaxed italic">
                         &ldquo;{analysis.description}&rdquo;
                       </p>
                     </div>
                   </div>
+
+                  {/* Fashion DNA Indicator */}
+                  {(fashionDNA || isAnalyzingDNA) && (
+                    <button
+                      onClick={() => setActiveView('dna')}
+                      className="w-full p-4 bg-gradient-to-r from-zinc-100 to-white rounded-xl border border-zinc-200 hover:border-zinc-300 transition-all group"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
+                            <Gem size={14} className="text-white" />
+                          </div>
+                          <div className="text-left">
+                            <p className="text-[10px] uppercase tracking-[0.15em] font-bold text-zinc-700">Fashion DNA</p>
+                            <p className="text-[9px] text-zinc-400">
+                              {isAnalyzingDNA && !fashionDNA ? 'Analyzing heritage...' : 'View historical analysis'}
+                            </p>
+                          </div>
+                        </div>
+                        {isAnalyzingDNA && !fashionDNA ? (
+                          <div className="w-4 h-4 border-2 border-zinc-400 border-t-black rounded-full animate-spin" />
+                        ) : (
+                          <span className="text-[10px] uppercase tracking-wider text-zinc-400 group-hover:text-black transition-colors">View →</span>
+                        )}
+                      </div>
+                    </button>
+                  )}
                 </div>
               )}
             </div>
           </div>
 
           <div className="lg:col-span-8">
-            {outfits.length > 0 ? (
+            {(outfits.length > 0 || fashionDNA) ? (
               <div className="space-y-12">
+                {/* View Toggle Tabs */}
                 <div className="flex items-end justify-between border-b border-zinc-100 pb-8">
-                  <div>
-                    <h3 className="text-3xl font-serif mb-2">The Collection</h3>
-                    <p className="text-xs text-zinc-400 uppercase tracking-widest">
-                      {activeColorFilter ? 'Filtered by active shade' : 'Three perspectives on your piece'}
-                    </p>
+                  <div className="flex items-center gap-1 p-1 bg-zinc-100 rounded-2xl">
+                    <button
+                      onClick={() => setActiveView('collection')}
+                      className={`px-6 py-3 rounded-xl text-[10px] font-bold uppercase tracking-[0.15em] transition-all duration-300 ${
+                        activeView === 'collection'
+                          ? 'bg-white text-black shadow-sm'
+                          : 'text-zinc-500 hover:text-zinc-700'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Sparkles size={14} />
+                        Collection
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setActiveView('dna')}
+                      disabled={!fashionDNA && !isAnalyzingDNA}
+                      className={`px-6 py-3 rounded-xl text-[10px] font-bold uppercase tracking-[0.15em] transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
+                        activeView === 'dna'
+                          ? 'bg-white text-black shadow-sm'
+                          : 'text-zinc-500 hover:text-zinc-700'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Gem size={14} />
+                        Fashion DNA
+                        {isAnalyzingDNA && !fashionDNA && (
+                          <span className="w-3 h-3 border-2 border-zinc-400 border-t-transparent rounded-full animate-spin" />
+                        )}
+                      </span>
+                    </button>
                   </div>
+
                   <div className="flex items-center gap-6">
-                    {activeColorFilter && (
+                    {activeView === 'collection' && activeColorFilter && (
                       <button
                         onClick={() => setActiveColorFilter(null)}
                         className="flex items-center gap-2 text-[10px] font-bold text-zinc-400 uppercase tracking-[0.2em] hover:text-black transition-colors"
@@ -494,33 +616,78 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="grid md:grid-cols-1 lg:grid-cols-2 gap-12">
-                  {filteredOutfits.length > 0 ? (
-                    filteredOutfits.map((outfit, idx) => (
-                      <OutfitCard
-                        key={idx}
-                        outfit={outfit}
-                        activeFilter={activeColorFilter}
-                        onColorClick={toggleFilter}
-                        onUpdate={(newImg) => updateOutfitImage(idx, newImg)}
-                      />
-                    ))
-                  ) : (
-                    <div className="col-span-full py-32 flex flex-col items-center justify-center bg-white rounded-[3rem] border border-zinc-100 shadow-sm animate-in zoom-in-95 duration-500">
-                      <div className="w-20 h-20 bg-zinc-50 rounded-full flex items-center justify-center mb-8">
-                         <Filter size={32} strokeWidth={1} className="text-zinc-200" />
+                {/* Collection View */}
+                {activeView === 'collection' && (
+                  <div className="space-y-8 animate-in fade-in duration-500">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-3xl font-serif mb-2">The Collection</h3>
+                        <p className="text-xs text-zinc-400 uppercase tracking-widest">
+                          {activeColorFilter ? 'Filtered by active shade' : 'Three perspectives on your piece'}
+                        </p>
                       </div>
-                      <h4 className="text-xl font-medium text-zinc-900 mb-2">No direct color matches</h4>
-                      <p className="text-sm text-zinc-400 font-light mb-8 max-w-xs text-center">Try selecting a complimentary shade or resetting the filter to see the full collection.</p>
-                      <button
-                        onClick={() => setActiveColorFilter(null)}
-                        className="px-8 py-3 bg-black text-white text-[10px] uppercase tracking-widest rounded-full hover:bg-zinc-800 transition-colors"
-                      >
-                        Show All Looks
-                      </button>
                     </div>
-                  )}
-                </div>
+
+                    <div className="grid md:grid-cols-1 lg:grid-cols-2 gap-12">
+                      {filteredOutfits.length > 0 ? (
+                        filteredOutfits.map((outfit, idx) => (
+                          <OutfitCard
+                            key={idx}
+                            outfit={outfit}
+                            activeFilter={activeColorFilter}
+                            onColorClick={toggleFilter}
+                            onUpdate={(newImg) => updateOutfitImage(idx, newImg)}
+                          />
+                        ))
+                      ) : outfits.length > 0 ? (
+                        <div className="col-span-full py-32 flex flex-col items-center justify-center bg-white rounded-[3rem] border border-zinc-100 shadow-sm animate-in zoom-in-95 duration-500">
+                          <div className="w-20 h-20 bg-zinc-50 rounded-full flex items-center justify-center mb-8">
+                            <Filter size={32} strokeWidth={1} className="text-zinc-200" />
+                          </div>
+                          <h4 className="text-xl font-medium text-zinc-900 mb-2">No direct color matches</h4>
+                          <p className="text-sm text-zinc-400 font-light mb-8 max-w-xs text-center">Try selecting a complimentary shade or resetting the filter to see the full collection.</p>
+                          <button
+                            onClick={() => setActiveColorFilter(null)}
+                            className="px-8 py-3 bg-black text-white text-[10px] uppercase tracking-widest rounded-full hover:bg-zinc-800 transition-colors"
+                          >
+                            Show All Looks
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="col-span-full py-32 flex flex-col items-center justify-center bg-white rounded-[3rem] border border-zinc-100 shadow-sm">
+                          <div className="w-16 h-16 border-2 border-zinc-200 border-t-black rounded-full animate-spin mb-8" />
+                          <p className="text-sm text-zinc-400 uppercase tracking-widest">Curating your collection...</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Fashion DNA View */}
+                {activeView === 'dna' && (
+                  <div className="animate-in fade-in slide-in-from-right-4 duration-500">
+                    {fashionDNA && analysis ? (
+                      <FashionDNACard fashionDNA={fashionDNA} itemName={analysis.itemName} />
+                    ) : isAnalyzingDNA ? (
+                      <div className="py-32 flex flex-col items-center justify-center bg-gradient-to-br from-zinc-900 via-zinc-800 to-black rounded-[3rem] shadow-xl">
+                        <div className="relative mb-8">
+                          <div className="w-20 h-20 border-2 border-white/20 rounded-full" />
+                          <div className="absolute inset-0 w-20 h-20 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        </div>
+                        <h4 className="text-xl font-serif text-white mb-2">Decoding Fashion DNA</h4>
+                        <p className="text-sm text-white/50 uppercase tracking-[0.3em]">Analyzing historical influences...</p>
+                      </div>
+                    ) : (
+                      <div className="py-32 flex flex-col items-center justify-center bg-white rounded-[3rem] border border-zinc-100 shadow-sm">
+                        <div className="w-20 h-20 bg-zinc-50 rounded-full flex items-center justify-center mb-8">
+                          <Gem size={32} strokeWidth={1} className="text-zinc-200" />
+                        </div>
+                        <h4 className="text-xl font-medium text-zinc-900 mb-2">Fashion DNA Unavailable</h4>
+                        <p className="text-sm text-zinc-400 font-light max-w-xs text-center">Historical analysis could not be completed for this item.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="h-full min-h-[600px] flex flex-col items-center justify-center bg-white rounded-[3rem] border border-zinc-100 shadow-sm relative overflow-hidden group">
