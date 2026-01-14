@@ -1,0 +1,14 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="224" fill="#000000"/>
+
+  <!-- Sparkle icon (stylized from Lucide) -->
+  <g transform="translate(256, 256) scale(2)">
+    <!-- Main sparkle -->
+    <path d="M128 48L143.2 104.8L200 120L143.2 135.2L128 192L112.8 135.2L56 120L112.8 104.8L128 48Z" fill="white"/>
+    <!-- Small sparkle top-right -->
+    <path d="M200 16L208 40L232 48L208 56L200 80L192 56L168 48L192 40L200 16Z" fill="white" opacity="0.6"/>
+    <!-- Small sparkle bottom-left -->
+    <path d="M56 176L64 200L88 208L64 216L56 240L48 216L24 208L48 200L56 176Z" fill="white" opacity="0.6"/>
+  </g>
+</svg>
