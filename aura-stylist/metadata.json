@@ -1,0 +1,7 @@
+{
+  "name": "Aura Stylist",
+  "description": "An AI-powered virtual stylist that creates complete outfit flat-lays based on a single item in your wardrobe.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
