@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { AnalysisResult, StyleType } from "../types";
+import { AnalysisResult, StyleType, FashionDNA } from "../types";
 import { getMimeTypeFromDataUrl, getBase64FromDataUrl } from "./imageValidationService";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
@@ -157,6 +157,129 @@ export const analyzeItem = async (base64Image: string): Promise<AnalysisResult> 
       throw new GeminiAPIError('Failed to parse AI response', 'PARSE_ERROR', false);
     }
   }, 'Clothing analysis');
+};
+
+/**
+ * Fashion DNA Analysis - Master Fashion Historian & Trend Forecaster
+ * Provides iconographic analysis mapping clothing to specific eras, designers, and style movements
+ */
+export const analyzeFashionDNA = async (base64Image: string): Promise<FashionDNA> => {
+  const prompt = `You are a master fashion historian and trend forecaster with encyclopedic knowledge spanning from
+ancient textile arts to contemporary haute couture. You have studied under legendary curators at the Met's Costume Institute,
+the V&A, and have advised leading fashion houses on archival research.
+
+Analyze this garment with the discerning eye of a chief curator preparing an exhibition at a world-class fashion museum.
+Your analysis should reflect the scholarly depth of a Vogue Runway editorial combined with the historical precision
+of academic fashion research.
+
+ICONOGRAPHIC ANALYSIS FRAMEWORK:
+
+1. PRIMARY ERA IDENTIFICATION: Identify the dominant historical period this piece channels. Be specific
+   (e.g., "Mid-Century American Sportswear" not just "1950s").
+
+2. STYLE MOVEMENTS: Connect to 2-3 fashion movements that inform this piece's DNA
+   (e.g., Bauhaus minimalism, Memphis design, Japanese avant-garde, British punk, etc.)
+
+3. DESIGNER INFLUENCES: Cite 2-3 specific designers or fashion houses whose signature elements are echoed here.
+   Include their peak era and what specific design signature is referenced.
+
+4. SILHOUETTE ANALYSIS: Describe the construction, proportions, and architectural elements using proper
+   fashion terminology (raglan sleeves, drop shoulder, A-line, bias cut, etc.)
+
+5. FABRIC INTELLIGENCE: Analyze the textile - its likely composition, weave/knit structure, weight,
+   and how it contributes to the garment's character.
+
+6. CULTURAL CONTEXT: Place this piece within its broader cultural moment - what social, artistic,
+   or political movements does it reflect?
+
+7. MODERN INTERPRETATION: How does this piece translate historical references for contemporary wear?
+
+8. INVESTMENT POTENTIAL: Classify as Heritage Piece, Contemporary Classic, Trend-Forward, or Timeless Essential.
+
+9. STYLE ARCHETYPE: What fashion archetype does this piece serve? (The Bohemian, The Minimalist, The Power Player, etc.)
+
+10. EDITORIAL NOTES: Write a brief, evocative description as if for a luxury fashion publication -
+    poetic yet informative, suitable for a high-end lookbook.
+
+Return structured JSON with deep fashion intelligence.`;
+
+  const mimeType = getMimeTypeFromDataUrl(base64Image);
+  const base64Data = getBase64FromDataUrl(base64Image);
+
+  return withRetry(async () => {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType, data: base64Data } },
+            { text: prompt }
+          ]
+        }
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            primaryEra: { type: Type.STRING, description: "The dominant historical era this piece channels" },
+            eraYearRange: { type: Type.STRING, description: "Specific year range (e.g., '1965-1972')" },
+            styleMovements: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  period: { type: Type.STRING },
+                  characteristics: { type: Type.ARRAY, items: { type: Type.STRING } }
+                },
+                required: ["name", "period", "characteristics"]
+              }
+            },
+            designerInfluences: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING, description: "Designer or fashion house name" },
+                  era: { type: Type.STRING, description: "Their peak era" },
+                  signature: { type: Type.STRING, description: "Their signature design element referenced" },
+                  relevance: { type: Type.STRING, description: "How this piece echoes their work" }
+                },
+                required: ["name", "era", "signature", "relevance"]
+              }
+            },
+            silhouetteAnalysis: { type: Type.STRING, description: "Technical analysis of construction and proportions" },
+            fabricIntelligence: { type: Type.STRING, description: "Textile analysis and contribution to character" },
+            culturalContext: { type: Type.STRING, description: "Broader cultural and social context" },
+            modernInterpretation: { type: Type.STRING, description: "How historical references translate to contemporary wear" },
+            investmentPotential: {
+              type: Type.STRING,
+              enum: ['Heritage Piece', 'Contemporary Classic', 'Trend-Forward', 'Timeless Essential']
+            },
+            styleArchetype: { type: Type.STRING, description: "The fashion archetype this piece serves" },
+            editorialNotes: { type: Type.STRING, description: "Evocative description for luxury publication" }
+          },
+          required: [
+            "primaryEra", "eraYearRange", "styleMovements", "designerInfluences",
+            "silhouetteAnalysis", "fabricIntelligence", "culturalContext",
+            "modernInterpretation", "investmentPotential", "styleArchetype", "editorialNotes"
+          ]
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) {
+      throw new GeminiAPIError('Empty response from fashion analysis', 'EMPTY_RESPONSE', true);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new GeminiAPIError('Failed to parse fashion DNA analysis', 'PARSE_ERROR', false);
+    }
+  }, 'Fashion DNA analysis');
 };
 
 export const generateOutfitImage = async (
